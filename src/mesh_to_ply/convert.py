@@ -5,7 +5,7 @@ import numpy as np
 def convert(in_path, out_path: Path, data_label: str = None) -> None:
     """ 
     Convert a meshio mesh file (used for .mesh) to .ply
-    Intended for a tetrahedral mesh with cell data
+    Intended for a tetrahedral mesh with cell data representing region index
     
     Inputs
     ------
@@ -16,42 +16,42 @@ def convert(in_path, out_path: Path, data_label: str = None) -> None:
     """
 
     mesh = meshio.read(in_path)
-
-    faces = mesh.cells_dict['tetra'][:, [[0,1,2],[0,3,1],[1,3,2],[0,2,3]]].reshape(-1,3)
-
-    _, inverse, counts = np.unique(np.sort(faces), axis = 0, return_inverse = True, return_counts = True)
-    is_boundary_face = counts[inverse] == 1
-    boundary_faces = faces[is_boundary_face, :]
-
-    points = np.unique(boundary_faces.flatten())
-
-    lut = np.full(points.max()+1, 0, dtype=smallest_uint_type(points.size))
-    lut[points] = np.arange(points.size)
-
+    
     key = next(iter(mesh.cell_data), None)
     if key is not None:
-        data_label = key if data_label is None else data_label
 
-        data = np.tile(mesh.cell_data_dict[data_label]['tetra'][:,None], (1, 4))
+        out_points = np.empty((0,3), dtype = np.float64)
+        out_tris = np.empty((0,3), dtype = np.int64)
+        for region_id in set(mesh.cell_data_dict[key]['tetra']):
+            surface_points, surface_faces = surface_from_mesh(mesh.points, mesh.cells_dict['tetra'][mesh.cell_data_dict[key]['tetra'] == region_id,:])
+
+            out_tris = np.vstack([out_tris, surface_faces + out_points.shape[0]])
+            out_points = np.vstack([out_points, surface_points])
+    else:
+        out_points, out_tris = surface_from_mesh(mesh.points, mesh.cells_dict['tetra'])
+
+    if out_tris.max() > np.iinfo(np.int32).max:
+        raise OverflowError("PLY cannot store indices > int32")
+
+    out_tris = out_tris.astype(np.int32)
 
     surface_mesh = meshio.Mesh(
-        points = mesh.points[points, :],
-        cells=[("triangle", lut[boundary_faces])]
+        points = out_points,
+        cells=[("triangle", out_tris)]
         )
 
     meshio.write(out_path, surface_mesh, file_format="ply")
 
-def smallest_uint_type(x: int):
-    if x < 0:
-        raise ValueError("Unsigned integers cannot store negative values.")
+def surface_from_mesh(points, tets: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    tris = tets[:, [[0,1,2],[0,3,1],[1,3,2],[0,2,3]]].reshape(-1,3)
 
-    if x <= np.iinfo(np.uint8).max:
-        return np.uint8
-    elif x <= np.iinfo(np.uint16).max:
-        return np.uint16
-    elif x <= np.iinfo(np.uint32).max:
-        return np.uint32
-    elif x <= np.iinfo(np.uint64).max:
-        return np.uint64
-    else:
-        raise ValueError("Integer too large for uint64.")
+    _, inverse, counts = np.unique(np.sort(tris), axis = 0, return_inverse = True, return_counts = True)
+    is_boundary_face = counts[inverse] == 1
+    boundary_tris = tris[is_boundary_face, :]
+
+    surface_point_id = np.unique(boundary_tris.flatten())
+
+    lut = np.full(surface_point_id.max()+1, -1, dtype=np.int64)
+    lut[surface_point_id] = np.arange(surface_point_id.size)
+
+    return points[surface_point_id, :], lut[boundary_tris]
